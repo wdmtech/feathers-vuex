@@ -1,4 +1,7 @@
 import fastCopy from 'fast-copy'
+import isPlainObject from 'lodash.isplainobject'
+import merge from 'lodash.merge'
+import { updateOriginal } from '../utils'
 
 const defaults = {
   idField: 'id',
@@ -8,35 +11,15 @@ const defaults = {
 
 export default function (options) {
   options = Object.assign({}, defaults, options)
-  const { idField, preferUpdate, instanceDefaults, globalModels, modelName } = options
-  // Don't modify the original instanceDefaults. Clone it with accessors intact
+  const { idField, preferUpdate, globalModels, modelName } = options
+  const instanceDefaults = options.instanceDefaults || {}
 
   class FeathersVuexModel {
     constructor (data = {}, options = {}) {
       const { store, namespace } = this.constructor
-      const relationships = {}
-      const _instanceDefaults = cloneWithAccessors(instanceDefaults)
-
-      Object.keys(_instanceDefaults).forEach(key => {
-        const modelName = instanceDefaults[key]
-
-        // If the default value for an instanceDefault matches a model name...
-        if (globalModels.hasOwnProperty(modelName)) {
-          // Store the relationship
-          relationships[key] = globalModels[modelName]
-          // Reset the instance default for this prop to null
-          _instanceDefaults[key] = null
-        }
-
-        // Or if the value is a Date
-        if (modelName === Date) {
-          // Store the relationships
-          relationships[key] = Date
-
-          // Reset the instance default for this prop to null
-          _instanceDefaults[key] = null
-        }
-      })
+      const existingItem = data[idField] && FeathersVuexModel.getFromStore(data[idField])
+      const _relationships = {}
+      let fnDefaults
 
       if (options.isClone) {
         Object.defineProperty(this, 'isClone', { value: true })
@@ -44,9 +27,48 @@ export default function (options) {
 
       Object.defineProperty(this, 'isFeathersVuexInstance', { value: true })
 
+      if (existingItem && !options.isClone) {
+        if (!data.isFeathersVuexInstance) {
+          updateOriginal(data, existingItem)
+        }
+        return existingItem
+      }
+
+      // Don't modify the original instanceDefaults. Clone it with accessors intact
+      if (typeof instanceDefaults === 'function') {
+        fnDefaults = instanceDefaults(data, { store, Model: this.constructor, Models: globalModels })
+      }
+      const _instanceDefaults = cloneWithAccessors(fnDefaults || instanceDefaults)
+
+      Object.keys(_instanceDefaults).forEach(key => {
+        // Prevent getters and setters from firing before the instance is constructed
+        const desc = Object.getOwnPropertyDescriptor(_instanceDefaults, key)
+        if (desc.get || desc.set || typeof desc.value === 'function') {
+          return
+        }
+
+        // If the default value for an instanceDefault matches a model name...
+        const modelName = _instanceDefaults[key]
+        if (globalModels.hasOwnProperty(modelName)) {
+          // Store the relationship
+          _relationships[key] = globalModels[modelName]
+          // Reset the instance default for this prop to null
+          _instanceDefaults[key] = null
+        }
+
+        // Or if the value is a Date
+        if (modelName === Date) {
+          // Store the relationships
+          _relationships[key] = Date
+
+          // Reset the instance default for this prop to null
+          _instanceDefaults[key] = null
+        }
+      })
+
       // Check the relationships to instantiate.
-      Object.keys(relationships).forEach(prop => {
-        const Model = relationships[prop]
+      Object.keys(_relationships).forEach(prop => {
+        const Model = _relationships[prop]
         const related = data[prop]
 
         if (related) {
@@ -87,12 +109,17 @@ export default function (options) {
       // Copy over all instance data
       const dataProps = Object.getOwnPropertyNames(data)
       dataProps.forEach(key => {
-        var desc = Object.getOwnPropertyDescriptor(data, key)
+        const desc = Object.getOwnPropertyDescriptor(data, key)
+        const propertyExists = this.hasOwnProperty(key)
+        const isComputed = desc.get || desc.set || typeof desc.value === 'function'
+        if (propertyExists && isComputed) {
+          return
+        }
         Object.defineProperty(this, key, desc)
       })
 
       // If this record has an id, addOrUpdate the store
-      if (data[idField] && !options.isClone) {
+      if (data[idField] && !options.isClone && !options.skipCommit) {
         store.dispatch(`${namespace}/addOrUpdate`, this)
       }
     }
@@ -168,6 +195,10 @@ export default function (options) {
       return this._remove(this[idField], params)
     }
     _remove () {}
+
+    toJSON () {
+      return merge({}, this)
+    }
   }
 
   Object.assign(FeathersVuexModel, {
@@ -189,16 +220,18 @@ function createRelatedInstance ({ item, Model, idField, store }) {
 }
 
 function cloneWithAccessors (obj) {
-  const clone = fastCopy(obj)
+  const clone = {}
 
-  var props = Object.getOwnPropertyNames(obj)
+  const props = Object.getOwnPropertyNames(obj)
   props.forEach(key => {
-    var desc = Object.getOwnPropertyDescriptor(obj, key)
+    const desc = Object.getOwnPropertyDescriptor(obj, key)
 
-    // Copy over accessors
-    if (desc.get || desc.set) {
-      Object.defineProperty(clone, key, desc)
+    // Do not allow sharing of deeply-nested objects between instances
+    if (isPlainObject(desc.value)) {
+      desc.value = fastCopy(desc.value)
     }
+
+    Object.defineProperty(clone, key, desc)
   })
 
   return clone

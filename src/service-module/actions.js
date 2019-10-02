@@ -1,4 +1,4 @@
-import { checkId } from '../utils'
+import { checkId, diffFunctions } from '../utils'
 
 export default function makeServiceActions (service, { debug }) {
   const serviceActions = {
@@ -10,21 +10,30 @@ export default function makeServiceActions (service, { debug }) {
         dispatch('addOrUpdateList', response)
         commit('unsetFindPending')
 
+        const mapItemFromState = item => {
+          const id = item[idField]
+
+          return state.keyedById[id]
+        }
+
         // The pagination data will be under `pagination.default` or whatever qid is passed.
         if (response.data) {
           commit('updatePaginationForQuery', { qid, response, query })
-          response.data = response.data.map(item => {
-            const id = item[idField]
 
-            return state.keyedById[id]
-          })
+          const mappedFromState = response.data.map(mapItemFromState)
+
+          if (mappedFromState[0] !== undefined) {
+            response.data = mappedFromState
+          }
         } else {
-          response = response.map(item => {
-            const id = item[idField]
+          const mappedFromState = response.map(mapItemFromState)
 
-            return state.keyedById[id]
-          })
+          if (mappedFromState[0] !== undefined) {
+            response = mappedFromState
+          }
         }
+
+        dispatch('afterFind', response)
 
         return response
       }
@@ -33,17 +42,10 @@ export default function makeServiceActions (service, { debug }) {
         commit('unsetFindPending')
         return Promise.reject(error)
       }
-      const request = service.find(params)
 
       commit('setFindPending')
 
-      if (service.rx) {
-        Object.getPrototypeOf(request).catch(handleError)
-      } else {
-        request.catch(handleError)
-      }
-
-      return request.subscribe ? request.subscribe(handleResponse) : request.then(handleResponse)
+      return service.find(params).then(handleResponse).catch(handleError)
     },
 
     // Two query syntaxes are supported, since actions only receive one argument.
@@ -57,7 +59,7 @@ export default function makeServiceActions (service, { debug }) {
 
       if (Array.isArray(args)) {
         id = args[0]
-        params = args[1]
+        params = args[1] || {}
       } else {
         id = args
         params = {}
@@ -77,7 +79,10 @@ export default function makeServiceActions (service, { debug }) {
             const id = item[idField]
 
             dispatch('addOrUpdate', item)
-            commit('setCurrent', item)
+
+            if (state.setCurrentOnGet) {
+              commit('setCurrent', item)
+            }
             commit('unsetGetPending')
             return state.keyedById[id]
           })
@@ -91,7 +96,9 @@ export default function makeServiceActions (service, { debug }) {
       // If the records is already in store, return it
       const existedItem = getters.get(id, params)
       if (existedItem) {
-        commit('setCurrent', existedItem)
+        if (state.setCurrentOnGet) {
+          commit('setCurrent', existedItem)
+        }
         if (!skipRequestIfExists) getFromRemote()
         return Promise.resolve(existedItem)
       }
@@ -110,6 +117,8 @@ export default function makeServiceActions (service, { debug }) {
         data = dataOrArray
       }
 
+      params = params || {}
+
       commit('setCreatePending')
 
       return service.create(data, params)
@@ -125,7 +134,11 @@ export default function makeServiceActions (service, { debug }) {
             const id = response[idField]
 
             dispatch('addOrUpdate', response)
-            commit('setCurrent', response)
+
+            if (state.setCurrentOnCreate) {
+              commit('setCurrent', response)
+            }
+
             response = state.keyedById[id]
           }
           commit('unsetCreatePending')
@@ -158,9 +171,25 @@ export default function makeServiceActions (service, { debug }) {
     },
 
     patch ({ commit, dispatch, state }, [id, data, params]) {
-      const { idField } = state
+      const { idField, diffOnPatch } = state
 
       commit('setPatchPending')
+
+      if (diffOnPatch) {
+        const { observableDiff, applyChange } = diffFunctions()
+        let diff = {}
+
+        observableDiff(state.copy, data, function (d) {
+          if (d.path && d.path.length) {
+            // Apply all changes except to the id property...
+            if (d.path[d.path.length - 1] !== idField) {
+              applyChange(diff, data, d)
+            }
+          }
+        })
+
+        data = diff
+      }
 
       return service.patch(id, data, params)
         .then(item => {
@@ -188,6 +217,8 @@ export default function makeServiceActions (service, { debug }) {
         id = idOrArray
       }
 
+      params = params || {}
+
       commit('setRemovePending')
 
       return service.remove(id, params)
@@ -205,6 +236,7 @@ export default function makeServiceActions (service, { debug }) {
   }
 
   const actions = {
+    afterFind ({ commit, dispatch, getters, state }, response) {},
     addOrUpdateList ({ state, commit }, response) {
       const list = response.data || response
       const isPaginated = response.hasOwnProperty('total')
@@ -234,9 +266,9 @@ export default function makeServiceActions (service, { debug }) {
         commit('removeItems', toRemove) // commit removal
       }
 
-      if (service.Model) {
+      if (service.FeathersVuexModel) {
         toAdd.forEach((item, index) => {
-          toAdd[index] = new service.Model(item)
+          toAdd[index] = new service.FeathersVuexModel(item, { skipCommit: true })
         })
       }
 
@@ -250,8 +282,8 @@ export default function makeServiceActions (service, { debug }) {
 
       const isIdOk = checkId(id, item, debug)
 
-      if (service.Model && !existingItem && !item.isFeathersVuexInstance) {
-        item = new service.Model(item)
+      if (service.FeathersVuexModel && !existingItem && !item.isFeathersVuexInstance) {
+        item = new service.FeathersVuexModel(item)
       }
 
       if (isIdOk) {

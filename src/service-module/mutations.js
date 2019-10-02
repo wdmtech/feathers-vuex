@@ -2,88 +2,97 @@ import Vue from 'vue'
 import _merge from 'lodash.merge'
 import serializeError from 'serialize-error'
 import isObject from 'lodash.isobject'
-import { checkId } from '../utils'
+import { checkId, updateOriginal } from '../utils'
 
 export default function makeServiceMutations (servicePath, { debug, globalModels }) {
   globalModels = globalModels || { byServicePath: {} }
 
-  function addItem (state, item) {
+  function addItems (state, items) {
     const { idField } = state
-    let id = item[idField]
     const Model = globalModels.byServicePath[servicePath]
-    const isIdOk = checkId(id, item, debug)
 
-    if (isIdOk) {
-      if (Model && !item.isFeathersVuexInstance) {
-        item = new Model(item)
+    let newKeyedById = { ...state.keyedById }
+
+    for (let item of items) {
+      let id = item[idField]
+      const isIdOk = checkId(id, item, debug)
+
+      if (isIdOk) {
+        if (Model && !item.isFeathersVuexInstance) {
+          item = new Model(item)
+        }
+
+        // Only add the id if it's not already in the `ids` list.
+        if (!state.ids.includes(id)) {
+          state.ids.push(id)
+        }
+
+        newKeyedById[id] = item
       }
-
-      // Only add the id if it's not already in the `ids` list.
-      if (!state.ids.includes(id)) {
-        state.ids.push(id)
-      }
-
-      state.keyedById = Object.assign({}, state.keyedById, { [id]: item })
     }
+
+    state.keyedById = newKeyedById
   }
 
-  function updateItem (state, item) {
+  function updateItems (state, items) {
     const { idField, replaceItems, addOnUpsert } = state
-    let id = item[idField]
-    const isIdOk = checkId(id, item, debug)
+    const Model = globalModels.byServicePath[servicePath]
 
-    // Simply rewrite the record if the it's already in the `ids` list.
-    if (isIdOk && state.ids.includes(id)) {
-      if (replaceItems) {
-        state.keyedById[id] = item
-      } else {
-        _merge(state.keyedById[id], item)
+    for (let item of items) {
+      let id = item[idField]
+      const isIdOk = checkId(id, item, debug)
+
+      // Update the record
+      if (isIdOk) {
+        if (state.ids.includes(id)) {
+          // Completely replace the item
+          if (replaceItems) {
+            if (Model && !item.isFeathersVuexInstance) {
+              item = new Model(item)
+            }
+            Vue.set(state.keyedById, id, item)
+          // Merge in changes
+          } else {
+            updateOriginal(item, state.keyedById[id])
+          }
+
+        // if addOnUpsert then add the record into the state, else discard it.
+        } else if (addOnUpsert) {
+          state.ids.push(id)
+          Vue.set(state.keyedById, id, item)
+        }
+        continue
       }
-      return
-    }
-
-    // if addOnUpsert then add the record into the state, else discard it.
-    if (addOnUpsert) {
-      state.ids.push(id)
-      state.keyedById = Object.assign({}, state.keyedById, { [id]: item })
     }
   }
 
   return {
     addItem (state, item) {
-      addItem(state, item)
+      addItems(state, [item])
     },
     addItems (state, items) {
-      items.forEach(item => addItem(state, item))
+      addItems(state, items)
     },
     updateItem (state, item) {
-      updateItem(state, item)
+      updateItems(state, [item])
     },
     updateItems (state, items) {
       if (!Array.isArray(items)) {
-        throw new Error('You must provide an array to the `removeItems` mutation.')
+        throw new Error('You must provide an array to the `updateItems` mutation.')
       }
-      items.forEach(item => updateItem(state, item))
+      updateItems(state, items)
     },
 
     removeItem (state, item) {
       const { idField } = state
       const idToBeRemoved = isObject(item) ? item[idField] : item
-      const keyedById = {}
       const { currentId } = state
       const isIdOk = checkId(idToBeRemoved, item, debug)
+      const index = state.ids.findIndex(i => i === idToBeRemoved)
 
-      if (isIdOk) {
-        state.ids = state.ids.filter(id => {
-          if (id === idToBeRemoved) {
-            return false
-          } else {
-            keyedById[id] = state.keyedById[id]
-            return true
-          }
-        })
-
-        state.keyedById = keyedById
+      if (isIdOk && index !== null && index !== undefined) {
+        Vue.delete(state.ids, index)
+        Vue.delete(state.keyedById, idToBeRemoved)
 
         if (currentId === idToBeRemoved) {
           state.currentId = null
@@ -93,38 +102,42 @@ export default function makeServiceMutations (servicePath, { debug, globalModels
     },
 
     removeItems (state, items) {
-      const { idField } = state
+      const { idField, currentId } = state
 
       if (!Array.isArray(items)) {
         throw new Error('You must provide an array to the `removeItems` mutation.')
       }
+      // Make sure we have an array of ids. Assume all are the same.
       const containsObjects = items[0] && isObject(items[0])
-      const keyedById = {}
-      const currentId = state.currentId
-      let idsToRemove = items
-      const mapOfIdsToRemove = {}
-
-      // If the array contains objects, create an array of ids. Assume all are the same.
-      if (containsObjects) {
-        idsToRemove = items.map(item => item[idField])
-      }
-
-      // Make a hash map of the idsToRemove, so we don't have to iterate inside a loop
-      idsToRemove.forEach(idToRemove => {
-        mapOfIdsToRemove[idToRemove] = idToRemove
+      const idsToRemove = containsObjects ? items.map(item => item[idField]) : items
+      const mapOfIdsToRemove = idsToRemove.reduce((map, id) => {
+        map[id] = true
+        return map
+      }, {})
+      idsToRemove.forEach(id => {
+        Vue.delete(state.keyedById, id)
       })
 
-      // Filter the ids to be those we're keeping. Also create new keyedById.
-      state.ids = state.ids.filter(id => {
+      // Get indexes to remove from the ids array.
+      const mapOfIndexesToRemove = state.ids.reduce((map, id, index) => {
         if (mapOfIdsToRemove[id]) {
-          return false
+          map[index] = true
+        }
+        return map
+      }, {})
+      // Remove highest indexes first, so the indexes don't change
+      const indexesInReverseOrder = Object.keys(mapOfIndexesToRemove).sort((a, b) => {
+        if (a < b) {
+          return 1
+        } else if (a > b) {
+          return -1
         } else {
-          keyedById[id] = state.keyedById[id]
-          return true
+          return 0
         }
       })
-
-      state.keyedById = keyedById
+      indexesInReverseOrder.forEach(indexInIdsArray => {
+        Vue.delete(state.ids, indexInIdsArray)
+      })
 
       if (currentId && mapOfIdsToRemove[currentId]) {
         state.currentId = null
@@ -132,6 +145,84 @@ export default function makeServiceMutations (servicePath, { debug, globalModels
       }
     },
 
+    setCurrent (state, itemOrId) {
+      const { idField } = state
+      const Model = globalModels.byServicePath[servicePath]
+      let id
+      let item
+
+      if (isObject(itemOrId)) {
+        id = itemOrId[idField]
+        item = itemOrId
+      } else {
+        id = itemOrId
+        item = state.keyedById[id]
+      }
+      state.currentId = id
+
+      state.copy = new Model(_merge({}, item), { isClone: true })
+    },
+
+    clearCurrent (state) {
+      state.currentId = null
+      state.copy = null
+    },
+
+    // Creates a copy of the record with the passed-in id, stores it in copiesById
+    createCopy (state, id) {
+      const current = state.keyedById[id]
+      const Model = globalModels.byServicePath[servicePath]
+      const copyData = _merge({}, current)
+      const copy = new Model(copyData, { isClone: true })
+
+      if (state.keepCopiesInStore) {
+        state.copiesById[id] = copy
+      } else {
+        Model.copiesById[id] = copy
+      }
+    },
+
+    // Deep assigns copy to original record, locally
+    commitCopy (state, id) {
+      const isIdOk = checkId(id, undefined, debug)
+      const current = isIdOk ? state.keyedById[id] : state.keyedById[state.currentId]
+      const Model = globalModels.byServicePath[servicePath]
+      let copy
+
+      if (state.keepCopiesInStore || !Model) {
+        copy = isIdOk ? state.copiesById[id] : state.copy
+      } else {
+        copy = Model.copiesById[id]
+      }
+
+      updateOriginal(copy, current)
+
+      // Object.assign(current, copy)
+    },
+    
+    // Resets the copy to match the original record, locally
+    rejectCopy (state, id) {
+      const isIdOk = checkId(id, undefined, debug)
+      const current = isIdOk ? state.keyedById[id] : state.keyedById[state.currentId]
+      const Model = globalModels.byServicePath[servicePath]
+      let copy
+
+      if (state.keepCopiesInStore || !Model) {
+        copy = isIdOk ? state.copiesById[id] : state.copy
+      } else {
+        copy = Model.copiesById[id]
+      }
+
+      _merge(copy, current)
+    },
+
+    // Removes the copy from copiesById
+    clearCopy (state, id) {
+      const newCopiesById = Object.assign({}, state.copiesById)
+      delete newCopiesById[id]
+      state.copiesById = newCopiesById
+    },
+    
     clearAll (state) {
       state.ids = []
       state.currentId = null
@@ -154,82 +245,6 @@ export default function makeServiceMutations (servicePath, { debug, globalModels
       }
     },
 
-    setCurrent (state, itemOrId) {
-      const { idField } = state
-      const Model = globalModels.byServicePath[servicePath]
-      let id
-      let item
-
-      if (isObject(itemOrId)) {
-        id = itemOrId[idField]
-        item = itemOrId
-      } else {
-        id = itemOrId
-        item = state.keyedById[id]
-      }
-      state.currentId = id
-
-      state.copy = new Model(item, { isClone: true })
-    },
-
-    clearCurrent (state) {
-      state.currentId = null
-      state.copy = null
-    },
-
-    // Removes the copy from copiesById
-    clearCopy (state, id) {
-      const newCopiesById = Object.assign({}, state.copiesById)
-      delete newCopiesById[id]
-      state.copiesById = newCopiesById
-    },
-
-    // Creates a copy of the record with the passed-in id, stores it in copiesById
-    createCopy (state, id) {
-      const current = state.keyedById[id]
-      const Model = globalModels.byServicePath[servicePath]
-      const copyData = _merge({}, current)
-      const copy = new Model(copyData, { isClone: true })
-
-      if (state.keepCopiesInStore) {
-        state.copiesById[id] = copy
-      } else {
-        Model.copiesById[id] = copy
-      }
-    },
-
-    // Resets the copy to match the original record, locally
-    rejectCopy (state, id) {
-      const isIdOk = checkId(id, undefined, debug)
-      const current = isIdOk ? state.keyedById[id] : state.keyedById[state.currentId]
-      const Model = globalModels.byServicePath[servicePath]
-      let copy
-
-      if (state.keepCopiesInStore || !Model) {
-        copy = isIdOk ? state.copiesById[id] : state.copy
-      } else {
-        copy = Model.copiesById[id]
-      }
-
-      _merge(copy, current)
-    },
-
-    // Deep assigns copy to original record, locally
-    commitCopy (state, id) {
-      const isIdOk = checkId(id, undefined, debug)
-      const current = isIdOk ? state.keyedById[id] : state.keyedById[state.currentId]
-      const Model = globalModels.byServicePath[servicePath]
-      let copy
-
-      if (state.keepCopiesInStore || !Model) {
-        copy = isIdOk ? state.copiesById[id] : state.copy
-      } else {
-        copy = Model.copiesById[id]
-      }
-
-      Object.assign(current, copy)
-    },
-
     // Stores pagination data on state.pagination based on the query identifier (qid)
     // The qid must be manually assigned to `params.qid`
     updatePaginationForQuery (state, { qid, response, query }) {
@@ -238,7 +253,8 @@ export default function makeServiceMutations (servicePath, { debug, globalModels
       const ids = data.map(item => {
         return item[idField]
       })
-      Vue.set(state.pagination, qid, { limit, skip, total, ids, query })
+      const queriedAt = new Date().getTime()
+      Vue.set(state.pagination, qid, { limit, skip, total, ids, query, queriedAt })
     },
 
     setFindPending (state) {

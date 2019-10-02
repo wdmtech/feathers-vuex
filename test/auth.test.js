@@ -1,5 +1,5 @@
 import { assert } from 'chai'
-import { reducer, default as feathersVuexAuth } from '../src/auth'
+import feathersVuexAuth, { reducer } from '../src/auth'
 import * as actionTypes from '../src/action-types'
 import './server'
 import { makeFeathersRestClient } from './feathers-client'
@@ -17,7 +17,7 @@ describe('feathers-vuex:auth', () => {
     var app = {}
     var store = {}
     var plugin = feathersVuexAuth(store).bind(app)
-    assert.throws(plugin, 'You must first register the feathers-authentication-client plugin')
+    assert.throws(plugin, 'You must first register the @feathersjs/authentication-client plugin')
   })
 
   it('returns the app, is chainable', () => {
@@ -62,7 +62,7 @@ describe('feathers-vuex:auth', () => {
     feathersClient.configure(feathersVuexAuth(fakeStore))
 
     try {
-      feathersClient.authenticate({test: true})
+      feathersClient.authenticate({ test: true })
         .then(response => {
           feathersClient.logout()
           return response
@@ -74,7 +74,7 @@ describe('feathers-vuex:auth', () => {
 
     }
     try {
-      feathersClient.authenticate({strategy: 'jwt', accessToken: 'q34twershtdyfhgmj'})
+      feathersClient.authenticate({ strategy: 'jwt', accessToken: 'q34twershtdyfhgmj' })
     } catch (err) {
       console.log(err)
     }

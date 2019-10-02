@@ -1,5 +1,5 @@
 import assert from 'chai/chai'
-import { initAuth } from '../src/utils'
+import { initAuth, getServicePrefix, getServiceCapitalization } from '../src/utils'
 import feathersNuxt from '../src/index'
 import { feathersSocketioClient as feathersClient } from './fixtures/feathers-client'
 import Vue from 'vue'
@@ -10,7 +10,7 @@ Vue.use(Vuex)
 const { service, auth } = feathersNuxt(feathersClient)
 
 describe('Utils', function () {
-  it('properly populates auth', function (done) {
+  it('properly populates auth', function () {
     const store = new Vuex.Store({
       plugins: [
         service('todos'),
@@ -23,16 +23,49 @@ describe('Utils', function () {
         cookie: 'feathers-jwt=' + accessToken
       }
     }
-    initAuth({
+    return initAuth({
       commit: store.commit,
       req,
       moduleName: 'auth',
       cookieName: 'feathers-jwt'
     })
-    .then(payload => {
-      assert(store.state.auth.accessToken === accessToken, 'the token was in place')
-      assert(store.state.auth.payload, 'the payload was set')
-      done()
+      .then(payload => {
+        assert(store.state.auth.accessToken === accessToken, 'the token was in place')
+        assert(store.state.auth.payload, 'the payload was set')
+        return feathersClient.passport.getJWT()
+      })
+      .then((token) => {
+        assert.isDefined(token, 'the feathers client storage was set')
+      })
+  })
+
+  describe('Inflections', function () {
+    it('properly inflects the service prefix', function () {
+      const decisionTable = [
+        ['todos', 'todos'],
+        ['TODOS', 'tODOS'],
+        ['environment-Panos', 'environmentPanos'],
+        ['env-panos', 'envPanos'],
+        ['envPanos', 'envPanos'],
+        ['api/v1/env-panos', 'envPanos']
+      ]
+      decisionTable.forEach(([ path, prefix ]) => {
+        assert(getServicePrefix(path) === prefix, `The service prefix for path "${path}" was "${getServicePrefix(path)}", expected "${prefix}"`)
+      })
+    })
+
+    it('properly inflects the service capitalization', function () {
+      const decisionTable = [
+        ['todos', 'Todos'],
+        ['TODOS', 'TODOS'],
+        ['environment-Panos', 'EnvironmentPanos'],
+        ['env-panos', 'EnvPanos'],
+        ['envPanos', 'EnvPanos'],
+        ['api/v1/env-panos', 'EnvPanos']
+      ]
+      decisionTable.forEach(([ path, prefix ]) => {
+        assert(getServiceCapitalization(path) === prefix, `The service prefix for path "${path}" was "${getServiceCapitalization(path)}", expected "${prefix}"`)
+      })
     })
   })
 })

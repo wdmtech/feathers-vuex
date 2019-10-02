@@ -6,10 +6,10 @@ import setupActions from './actions'
 const defaults = {
   namespace: 'auth',
   userService: '', // Set this to automatically populate the user (using an additional request) on login success.
-  state: {},     // for custom state
-  getters: {},   // for custom getters
+  state: {}, // for custom state
+  getters: {}, // for custom getters
   mutations: {}, // for custom mutations
-  actions: {}    // for custom actions
+  actions: {} // for custom actions
 }
 
 export default function authPluginInit (feathersClient, globalOptions = {}, globalModels = {}) {
@@ -21,7 +21,7 @@ export default function authPluginInit (feathersClient, globalOptions = {}, glob
     options = Object.assign({}, defaults, options)
 
     if (!feathersClient.authenticate) {
-      throw new Error('You must register the feathers-authentication-client plugin before using the feathers-vuex auth module')
+      throw new Error('You must register the @feathersjs/authentication-client plugin before using the feathers-vuex auth module')
     }
 
     const defaultState = setupState(options)
